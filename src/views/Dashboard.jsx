@@ -1,6 +1,6 @@
 import { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Empty, Icon, PageHead, PeriodPicker } from '../ui';
-import { addDays, dayKey, fmt, fmtShort, inRange, periodRange, startOfDay } from '../utils';
+import { addDays, dayKey, downloadCSV, fmt, fmtShort, inRange, periodRange, startOfDay } from '../utils';
 
 const sum = (arr, f) => arr.reduce((s, x) => s + f(x), 0);
 
@@ -42,7 +42,7 @@ export default function Dashboard({ sales, expenses }) {
         map.set(k, cur);
       })
     );
-    return [...map.values()].sort((a, b) => b.revenue - a.revenue).slice(0, 8);
+    return [...map.values()].sort((a, b) => b.qty - a.qty || b.revenue - a.revenue);
   }, [s]);
 
   const expByCat = useMemo(() => {
@@ -52,7 +52,7 @@ export default function Dashboard({ sales, expenses }) {
   }, [e]);
 
   const cashPct = stats.income ? Math.round((stats.cash / stats.income) * 100) : 0;
-  const topMax = Math.max(1, ...top.map((t) => t.revenue));
+  const topMax = Math.max(1, ...top.map((t) => t.qty));
   const expMax = Math.max(1, ...expByCat.map((t) => t[1]));
 
   return (
@@ -141,26 +141,50 @@ export default function Dashboard({ sales, expenses }) {
         )}
       </section>
 
-      <div className="two-col">
-        <section className="card">
-          <div className="card-head"><h3>Productos más vendidos</h3></div>
-          {top.length === 0 ? (
-            <p className="muted">Sin datos en este periodo.</p>
-          ) : (
-            <ul className="rank">
-              {top.map((t, i) => (
-                <li key={t.name}>
-                  <span className="rank-n">{i + 1}</span>
-                  <div className="rank-body">
-                    <div className="rank-row"><strong>{t.name}</strong><span>{fmt(t.revenue)}</span></div>
-                    <div className="rank-bar"><div style={{ width: `${(t.revenue / topMax) * 100}%` }} /></div>
-                    <span className="muted sm">{t.qty} {t.qty === 1 ? 'unidad' : 'unidades'}</span>
-                  </div>
-                </li>
-              ))}
-            </ul>
+      <section className="card">
+        <div className="card-head">
+          <h3>Productos vendidos</h3>
+          {top.length > 0 && (
+            <div className="row gap-s">
+              <span className="muted sm">{top.length} {top.length === 1 ? 'producto' : 'productos'} · {stats.items} unidades</span>
+              <button className="btn ghost sm" onClick={() => downloadCSV(`productos-vendidos-${dayKey(new Date())}.csv`, [
+                ['Producto', 'Unidades', 'Total vendido'],
+                ...top.map((t) => [t.name, t.qty, t.revenue]),
+              ])}>
+                <Icon name="download" size={16} /> Exportar
+              </button>
+            </div>
           )}
-        </section>
+        </div>
+        {top.length === 0 ? (
+          <p className="muted">No se vendieron productos en este periodo.</p>
+        ) : (
+          <div className="table-wrap">
+            <table className="table sold">
+              <thead>
+                <tr><th>Producto</th><th className="num">Unidades</th><th className="num">Total vendido</th></tr>
+              </thead>
+              <tbody>
+                {top.map((t) => (
+                  <tr key={t.name}>
+                    <td>
+                      <strong>{t.name}</strong>
+                      <div className="rank-bar"><div style={{ width: `${(t.qty / topMax) * 100}%` }} /></div>
+                    </td>
+                    <td className="num"><strong>{t.qty}</strong></td>
+                    <td className="num">{fmt(t.revenue)}</td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr><td>Total</td><td className="num">{stats.items}</td><td className="num">{fmt(stats.income)}</td></tr>
+              </tfoot>
+            </table>
+          </div>
+        )}
+      </section>
+
+      <div>
         <section className="card">
           <div className="card-head"><h3>Gastos por categoría</h3></div>
           {expByCat.length === 0 ? (
