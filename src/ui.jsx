@@ -25,6 +25,8 @@ const ICONS = {
   lock: ['M6 11h12v10H6z', 'M8.5 11V8a3.5 3.5 0 0 1 7 0v3'],
   check: ['M5 12.5l4.5 4.5L19 7'],
   tag: ['M3 12V4h8l10 10-8 8z', 'M7.5 8.5h.01'],
+  users: ['M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z', 'M2 21v-1a6 6 0 0 1 6-6h2a6 6 0 0 1 6 6v1', 'M16 3.5a4 4 0 0 1 0 7', 'M19 14a5 5 0 0 1 3 4.6V21'],
+  logout: ['M15 4h4a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1h-4', 'M10 17l-5-5 5-5', 'M5 12h11'],
 };
 
 export function Icon({ name, size = 20, stroke = 2 }) {

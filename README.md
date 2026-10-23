@@ -1,13 +1,41 @@
 # Control de Ventas
 
-App web para registrar ventas (efectivo / transferencia), gastos, y ver un resumen
-de cuánto debería haber en caja y en la cuenta.
+App web para registrar ventas (efectivo / transferencia) desde varios dispositivos, con
+sincronización en tiempo real y dos perfiles: **administrador** y **vendedor**.
 
-- **Vender**: toca los productos, ajusta cantidades y cobra con un botón: *Efectivo* o *Transferencia*. Incluye calculadora de cambio, nota opcional, "monto libre" y botón *Deshacer*.
-- **Resumen**: filtra por hoy / ayer / semana / mes / rango. Muestra cuánto debería haber en efectivo y en transferencias (ventas − gastos de cada método), ingresos, gastos, ganancia, ticket promedio, gráfico de ventas y productos más vendidos.
-- **Ventas**: historial por día, filtros por método, eliminar ventas y exportar a Excel (CSV).
-- **Gastos**: registra gastos con categoría, método de pago y fecha.
-- **Productos**: crea, edita, oculta o elimina productos (nombre, precio, categoría, emoji y color).
+## Perfiles
+
+| | Vendedor | Administrador |
+|---|---|---|
+| Vender (efectivo / transferencia) | ✅ | ✅ |
+| Crear y editar productos | ✅ (borra solo los suyos) | ✅ |
+| Ver sus propias ventas y su resumen | ✅ | ✅ |
+| Borrar una venta | Solo las suyas, hasta 15 min después | ✅ todas |
+| Ver ventas de todos, por vendedor | — | ✅ |
+| Gastos, ganancias, cuánto debería haber en caja | — | ✅ |
+| Aprobar / desactivar vendedores (Equipo) | — | ✅ |
+
+## Primer uso
+
+1. Abre la app y toca **Crear cuenta**. **La primera cuenta que se registra queda como administrador**.
+2. Cada vendedor abre la app en su celular y toca **Crear cuenta**.
+3. El administrador entra a **Equipo** y toca **Aprobar**. El vendedor entra automáticamente.
+
+## Base de datos (Supabase)
+
+Usa el proyecto Supabase **kasa_diamante** (`vlptkwoderbrbqylqjvx`), con tablas propias de prefijo
+`mic_` (`mic_profiles`, `mic_products`, `mic_sales`, `mic_expenses`) para no mezclarse con las de Kasa Diamante.
+El esquema ya está aplicado; [`supabase.sql`](supabase.sql) queda como referencia.
+
+La URL y la clave pública vienen incluidas en el código (están hechas para ir en el navegador; la
+seguridad la dan las políticas RLS). Se pueden cambiar con `VITE_SUPABASE_URL` y `VITE_SUPABASE_ANON_KEY`.
+
+### Ajustes recomendados en Supabase (Authentication)
+
+- **URL Configuration → Redirect URLs**: agrega la URL de Vercel (ej. `https://micheladas.vercel.app/**`) para que
+  el correo de confirmación regrese a esta app y no al sitio de Kasa Diamante.
+- Si no quieres que los vendedores tengan que confirmar el correo, desactiva **Confirm email** en
+  *Sign In / Providers → Email* (afecta también a Kasa Diamante).
 
 ## Ejecutar en tu computador
 
@@ -16,34 +44,8 @@ npm install
 npm run dev
 ```
 
-## Dónde se guardan los datos
-
-| Modo | Cómo se activa | Qué significa |
-|---|---|---|
-| **Local** (por defecto) | Sin variables de entorno | Los datos quedan en el navegador de ese dispositivo. Usa *Respaldo* / *Restaurar* para guardar copias. |
-| **Nube (Supabase)** | Configurando `VITE_SUPABASE_URL` y `VITE_SUPABASE_ANON_KEY` | Todos los celulares/computadores ven los mismos datos. **Recomendado** si venden desde más de un dispositivo. |
-
-### Activar Supabase (gratis)
-
-1. Crea un proyecto en https://supabase.com.
-2. Ve a **SQL Editor**, pega el contenido de [`supabase.sql`](supabase.sql) y ejecútalo.
-3. En **Project Settings → API** copia la *Project URL* y la *anon public key*.
-4. Ponlas como variables de entorno (en Vercel o en un archivo `.env` local, ver `.env.example`).
-
 ## Desplegar en Vercel
 
-1. Sube esta carpeta a un repositorio de GitHub.
-2. En https://vercel.com → **Add New → Project** → importa el repositorio. Vercel detecta Vite automáticamente (`vercel.json` ya está listo).
-3. En **Environment Variables** agrega (opcionales):
-   - `VITE_BUSINESS_NAME` → nombre del negocio que aparece en la app.
-   - `VITE_SUPABASE_URL` y `VITE_SUPABASE_ANON_KEY` → para guardar en la nube.
-   - `VITE_APP_PIN` → PIN para entrar a la app.
-4. **Deploy**. Si cambias variables después, haz *Redeploy*.
-
-También puedes desplegar desde la terminal:
-
-```bash
-npx vercel --prod
-```
-
-> Nota de seguridad: el PIN es una protección básica en el navegador. Con Supabase, cualquiera que tenga la URL de la app podría acceder a los datos, así que no compartas el enlace públicamente.
+1. Importa el repositorio en https://vercel.com → **Add New → Project** (Vite se detecta solo).
+2. Opcional: variable `VITE_BUSINESS_NAME` con el nombre del negocio.
+3. **Deploy**.

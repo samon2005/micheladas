@@ -1,50 +1,116 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { db, isCloud } from './data';
+import { auth, db, normalize, supabase, upsertRow } from './data';
 import { Icon } from './ui';
+import Login, { BUSINESS, Logo, Pending } from './views/Login';
 import Sell from './views/Sell';
 import Dashboard from './views/Dashboard';
 import History from './views/History';
 import Expenses from './views/Expenses';
 import Products from './views/Products';
+import Team from './views/Team';
 
-const BUSINESS = import.meta.env.VITE_BUSINESS_NAME || 'Mi Negocio';
-const PIN = import.meta.env.VITE_APP_PIN || '';
-
-const TABS = [
+const ADMIN_TABS = [
   { id: 'vender', label: 'Vender', icon: 'sell' },
   { id: 'resumen', label: 'Resumen', icon: 'chart' },
   { id: 'ventas', label: 'Ventas', icon: 'receipt' },
   { id: 'gastos', label: 'Gastos', icon: 'wallet' },
   { id: 'productos', label: 'Productos', icon: 'box' },
+  { id: 'equipo', label: 'Equipo', icon: 'users' },
 ];
 
-function readTab() {
+const SELLER_TABS = [
+  { id: 'vender', label: 'Vender', icon: 'sell' },
+  { id: 'resumen', label: 'Mi resumen', icon: 'chart' },
+  { id: 'ventas', label: 'Mis ventas', icon: 'receipt' },
+  { id: 'productos', label: 'Productos', icon: 'box' },
+];
+
+function readTab(tabs) {
   const h = window.location.hash.replace('#', '');
-  return TABS.some((t) => t.id === h) ? h : 'vender';
+  return tabs.some((t) => t.id === h) ? h : 'vender';
 }
 
-function isUnlocked() {
-  if (!PIN) return true;
-  try {
-    return localStorage.getItem('cv_pin') === PIN;
-  } catch {
-    return false;
-  }
-}
-
+// ---------- sesión y perfil ----------
 export default function App() {
-  const [unlocked, setUnlocked] = useState(isUnlocked);
-  if (!unlocked) return <PinGate onUnlock={() => setUnlocked(true)} />;
-  return <Main />;
+  const [session, setSession] = useState(undefined);
+  const [profile, setProfile] = useState(null);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => setSession(data.session));
+    const { data } = supabase.auth.onAuthStateChange((_event, s) => setSession(s));
+    return () => data.subscription.unsubscribe();
+  }, []);
+
+  const userId = session?.user?.id;
+
+  const loadProfile = useCallback(async () => {
+    if (!session) return;
+    try {
+      setError('');
+      setProfile(await auth.ensureProfile(session.user.user_metadata?.full_name));
+    } catch (e) {
+      console.error(e);
+      setError(e?.message || 'No se pudo cargar tu perfil');
+    }
+  }, [session]);
+
+  useEffect(() => {
+    if (!userId) {
+      setProfile(null);
+      return;
+    }
+    loadProfile();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId]);
+
+  // Mientras espera aprobación, escucha su propio perfil en tiempo real
+  useEffect(() => {
+    if (!profile || profile.active) return;
+    const ch = supabase
+      .channel('mic-mi-perfil')
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'mic_profiles', filter: `id=eq.${profile.id}` },
+        ({ new: row }) => setProfile(row))
+      .subscribe();
+    const t = setInterval(loadProfile, 20000);
+    return () => { supabase.removeChannel(ch); clearInterval(t); };
+  }, [profile, loadProfile]);
+
+  if (session === undefined) return <Splash />;
+  if (!session) return <Login />;
+  if (error) {
+    return (
+      <div className="error-box">
+        <h3>No se pudo cargar tu perfil</h3>
+        <p>{error}</p>
+        <div className="row gap-s">
+          <button className="btn primary" onClick={loadProfile}>Reintentar</button>
+          <button className="btn ghost" onClick={() => auth.signOut()}>Cerrar sesión</button>
+        </div>
+      </div>
+    );
+  }
+  if (!profile) return <Splash />;
+  if (!profile.active) return <Pending profile={profile} onRefresh={loadProfile} />;
+  return <Main key={profile.id + profile.role} me={profile} setMe={setProfile} />;
 }
 
-function Main() {
-  const [tab, setTab] = useState(readTab);
+function Splash() {
+  return <div className="loading"><div className="spinner" /> Cargando…</div>;
+}
+
+// ---------- app principal ----------
+function Main({ me, setMe }) {
+  const isAdmin = me.role === 'admin';
+  const tabs = isAdmin ? ADMIN_TABS : SELLER_TABS;
+  const [tab, setTab] = useState(() => readTab(tabs));
   const [products, setProducts] = useState([]);
   const [sales, setSales] = useState([]);
   const [expenses, setExpenses] = useState([]);
+  const [profiles, setProfiles] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [live, setLive] = useState(false);
   const [toasts, setToasts] = useState([]);
   const toastId = useRef(0);
 
@@ -61,10 +127,16 @@ function Main() {
 
   const load = useCallback(async () => {
     try {
-      const [p, s, e] = await Promise.all([db.list('products'), db.list('sales'), db.list('expenses')]);
+      const [p, s, e, pr] = await Promise.all([
+        db.list('products'),
+        db.list('sales'),
+        isAdmin ? db.list('expenses') : Promise.resolve([]),
+        isAdmin ? db.list('profiles') : Promise.resolve([]),
+      ]);
       setProducts(p);
       setSales(s);
       setExpenses(e);
+      setProfiles(pr);
       setError('');
     } catch (e) {
       console.error(e);
@@ -72,21 +144,45 @@ function Main() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [isAdmin]);
 
   useEffect(() => {
     load();
-    // Si hay varios dispositivos, recarga al volver a la pestaña
-    const onFocus = () => document.visibilityState === 'visible' && load();
-    document.addEventListener('visibilitychange', onFocus);
-    return () => document.removeEventListener('visibilitychange', onFocus);
+    const onVisible = () => document.visibilityState === 'visible' && load();
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
   }, [load]);
 
+  // Tiempo real: aplica los cambios que hagan otros dispositivos
   useEffect(() => {
-    const onHash = () => setTab(readTab());
+    const setters = { products: setProducts, sales: setSales, expenses: setExpenses, profiles: setProfiles };
+    let wasLive = false;
+    return db.subscribe(
+      (table, payload) => {
+        if (table === 'profiles' && payload.new?.id === me.id) {
+          const p = payload.new;
+          if (!p.active || p.role !== me.role) setMe(p);
+        }
+        if (table === 'expenses' && !isAdmin) return;
+        if (table === 'profiles' && !isAdmin) return;
+        const set = setters[table];
+        if (payload.eventType === 'DELETE') set((l) => l.filter((x) => x.id !== payload.old.id));
+        else set((l) => upsertRow(l, normalize(table, payload.new)));
+      },
+      (status) => {
+        const ok = status === 'SUBSCRIBED';
+        setLive(ok);
+        if (ok && wasLive) load(); // tras reconectar, recarga lo que se pudo perder
+        if (ok) wasLive = true;
+      }
+    );
+  }, [me.id, me.role, isAdmin, setMe, load]);
+
+  useEffect(() => {
+    const onHash = () => setTab(readTab(tabs));
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
-  }, []);
+  }, [tabs]);
 
   const go = (id) => {
     window.location.hash = id;
@@ -99,7 +195,7 @@ function Main() {
     async addProduct(values) {
       try {
         const row = await db.insert('products', values);
-        setProducts((p) => [row, ...p]);
+        setProducts((p) => upsertRow(p, row));
         toast(`Producto "${row.name}" creado`);
         return true;
       } catch (e) { fail(e); return false; }
@@ -107,7 +203,7 @@ function Main() {
     async updateProduct(id, patch) {
       try {
         const row = await db.update('products', id, patch);
-        setProducts((p) => p.map((x) => (x.id === id ? row : x)));
+        setProducts((p) => upsertRow(p, row));
         return true;
       } catch (e) { fail(e); return false; }
     },
@@ -121,7 +217,7 @@ function Main() {
     async addSale(values) {
       try {
         const row = await db.insert('sales', values);
-        setSales((s) => [row, ...s]);
+        setSales((s) => upsertRow(s, row));
         toast(`Venta registrada · ${values.method === 'efectivo' ? 'Efectivo' : 'Transferencia'}`, {
           type: 'success',
           action: { label: 'Deshacer', run: () => actions.deleteSale(row.id, true) },
@@ -140,7 +236,7 @@ function Main() {
     async addExpense(values) {
       try {
         const row = await db.insert('expenses', values);
-        setExpenses((s) => [row, ...s].sort((a, b) => new Date(b.created_at) - new Date(a.created_at)));
+        setExpenses((s) => upsertRow(s, row));
         toast('Gasto registrado', { type: 'success' });
         return true;
       } catch (e) { fail(e); return false; }
@@ -152,34 +248,26 @@ function Main() {
         toast('Gasto eliminado');
       } catch (e) { fail(e); }
     },
-  };
-
-  const exportBackup = () => {
-    const blob = new Blob([JSON.stringify(db.exportAll(), null, 2)], { type: 'application/json' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = `respaldo-ventas-${new Date().toISOString().slice(0, 10)}.json`;
-    a.click();
-  };
-
-  const importBackup = (file) => {
-    const reader = new FileReader();
-    reader.onload = () => {
+    async updateProfile(id, patch) {
       try {
-        const data = JSON.parse(reader.result);
-        if (!confirm('Esto reemplazará los datos actuales de este dispositivo. ¿Continuar?')) return;
-        db.importAll(data);
-        load();
-        toast('Respaldo restaurado', { type: 'success' });
-      } catch {
-        toast('Archivo de respaldo inválido', { type: 'error' });
-      }
-    };
-    reader.readAsText(file);
+        const row = await db.update('profiles', id, patch);
+        setProfiles((p) => upsertRow(p, row));
+        toast('Equipo actualizado', { type: 'success' });
+      } catch (e) { fail(e); }
+    },
+    async deleteProfile(id) {
+      try {
+        await db.remove('profiles', id);
+        setProfiles((p) => p.filter((x) => x.id !== id));
+        toast('Solicitud rechazada');
+      } catch (e) { fail(e); }
+    },
   };
+
+  const pendingCount = profiles.filter((p) => !p.active && p.role === 'vendedor').length;
 
   let view;
-  if (loading) view = <div className="loading"><div className="spinner" /> Cargando…</div>;
+  if (loading) view = <Splash />;
   else if (error) view = (
     <div className="error-box">
       <h3>No se pudo conectar</h3>
@@ -188,55 +276,58 @@ function Main() {
     </div>
   );
   else if (tab === 'vender') view = <Sell products={products} onSale={actions.addSale} goProducts={() => go('productos')} />;
-  else if (tab === 'resumen') view = <Dashboard sales={sales} expenses={expenses} />;
-  else if (tab === 'ventas') view = <History sales={sales} onDelete={actions.deleteSale} />;
-  else if (tab === 'gastos') view = <Expenses expenses={expenses} onAdd={actions.addExpense} onDelete={actions.deleteExpense} />;
-  else view = <Products products={products} actions={actions} />;
+  else if (tab === 'resumen') view = <Dashboard sales={sales} expenses={expenses} isAdmin={isAdmin} profiles={profiles} me={me} />;
+  else if (tab === 'ventas') view = <History sales={sales} onDelete={actions.deleteSale} isAdmin={isAdmin} me={me} />;
+  else if (tab === 'gastos' && isAdmin) view = <Expenses expenses={expenses} onAdd={actions.addExpense} onDelete={actions.deleteExpense} />;
+  else if (tab === 'equipo' && isAdmin) view = <Team profiles={profiles} sales={sales} me={me} actions={actions} />;
+  else view = <Products products={products} actions={actions} isAdmin={isAdmin} me={me} />;
 
   return (
-    <div className={`app tab-${tab}`}>
+    <div className={`app tab-${tab} ${isAdmin ? 'is-admin' : 'is-seller'}`}>
       <aside className="sidebar">
         <div className="brand">
-          <div className="logo">
-            <svg viewBox="0 0 64 64" width="26" height="26" aria-hidden="true">
-              <path d="M20 14h24l-3 34a4 4 0 0 1-4 4H27a4 4 0 0 1-4-4z" fill="#fff" />
-              <path d="M22.5 26h19l-1.6 19.5h-15.8z" fill="#f5a524" />
-            </svg>
-          </div>
+          <Logo />
           <div>
             <strong>{BUSINESS}</strong>
             <span>Control de ventas</span>
           </div>
         </div>
         <nav className="nav">
-          {TABS.map((t) => (
+          {tabs.map((t) => (
             <button key={t.id} className={tab === t.id ? 'active' : ''} onClick={() => go(t.id)}>
-              <Icon name={t.icon} size={21} />
+              <span className="nav-icon">
+                <Icon name={t.icon} size={21} />
+                {t.id === 'equipo' && pendingCount > 0 && <i className="nav-badge">{pendingCount}</i>}
+              </span>
               <span>{t.label}</span>
             </button>
           ))}
         </nav>
         <div className="sidebar-foot">
-          <div className={`sync ${isCloud ? 'cloud' : 'local'}`}>
-            <Icon name={isCloud ? 'cloud' : 'device'} size={16} />
-            {isCloud ? 'Sincronizado en la nube' : 'Guardado en este dispositivo'}
+          <div className={`sync ${live ? 'cloud' : 'local'}`}>
+            <i className={`live-dot ${live ? 'on' : ''}`} />
+            {live ? 'En vivo · sincronizado' : 'Conectando…'}
           </div>
-          {isCloud ? (
-            <button className="btn ghost sm" onClick={() => { load(); toast('Datos actualizados'); }}>
-              <Icon name="refresh" size={16} /> Actualizar
-            </button>
-          ) : (
-            <div className="backup">
-              <button className="btn ghost sm" onClick={exportBackup}><Icon name="download" size={16} /> Respaldo</button>
-              <label className="btn ghost sm">
-                <Icon name="upload" size={16} /> Restaurar
-                <input type="file" accept="application/json" hidden
-                  onChange={(e) => { e.target.files[0] && importBackup(e.target.files[0]); e.target.value = ''; }} />
-              </label>
+          <div className="me">
+            <span className={`avatar ${me.role}`}>{me.full_name.charAt(0).toUpperCase()}</span>
+            <div>
+              <strong>{me.full_name}</strong>
+              <span>{isAdmin ? 'Administrador' : 'Vendedor'}</span>
             </div>
-          )}
+            <button className="icon-btn" title="Cerrar sesión" aria-label="Cerrar sesión" onClick={() => auth.signOut()}>
+              <Icon name="logout" size={18} />
+            </button>
+          </div>
         </div>
       </aside>
+
+      <div className="mobile-top">
+        <div className="row gap-s">
+          <i className={`live-dot ${live ? 'on' : ''}`} />
+          <span><strong>{me.full_name}</strong> · {isAdmin ? 'Admin' : 'Vendedor'}</span>
+        </div>
+        <button className="btn ghost sm" onClick={() => auth.signOut()}><Icon name="logout" size={15} /> Salir</button>
+      </div>
 
       <main className="content">{view}</main>
 
@@ -253,34 +344,6 @@ function Main() {
           </div>
         ))}
       </div>
-    </div>
-  );
-}
-
-function PinGate({ onUnlock }) {
-  const [pin, setPin] = useState('');
-  const [bad, setBad] = useState(false);
-  const submit = (e) => {
-    e.preventDefault();
-    if (pin === PIN) {
-      try { localStorage.setItem('cv_pin', pin); } catch { /* sin almacenamiento */ }
-      onUnlock();
-    } else {
-      setBad(true);
-      setPin('');
-    }
-  };
-  return (
-    <div className="pin-gate">
-      <form className="pin-card" onSubmit={submit}>
-        <div className="pin-icon"><Icon name="lock" size={26} /></div>
-        <h2>{BUSINESS}</h2>
-        <p>Ingresa el PIN para continuar</p>
-        <input type="password" inputMode="numeric" autoFocus value={pin}
-          onChange={(e) => { setPin(e.target.value); setBad(false); }} placeholder="••••" />
-        {bad && <span className="pin-error">PIN incorrecto</span>}
-        <button className="btn primary block" type="submit">Entrar</button>
-      </form>
     </div>
   );
 }

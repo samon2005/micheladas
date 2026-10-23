@@ -4,14 +4,40 @@ import { addDays, dayKey, downloadCSV, fmt, fmtShort, inRange, periodRange, star
 
 const sum = (arr, f) => arr.reduce((s, x) => s + f(x), 0);
 
-export default function Dashboard({ sales, expenses }) {
+export default function Dashboard({ sales, expenses, isAdmin, profiles = [] }) {
   const [period, setPeriod] = useState('hoy');
   const [custom, setCustom] = useState({ from: dayKey(addDays(new Date(), -6)), to: dayKey(new Date()) });
   const [view, setView] = useState('chart');
+  const [seller, setSeller] = useState('');
 
   const range = useMemo(() => periodRange(period, custom), [period, custom]);
-  const s = useMemo(() => sales.filter((x) => inRange(x.created_at, range)), [sales, range]);
-  const e = useMemo(() => expenses.filter((x) => inRange(x.created_at, range)), [expenses, range]);
+  const periodSales = useMemo(() => sales.filter((x) => inRange(x.created_at, range)), [sales, range]);
+  const s = useMemo(() => (seller ? periodSales.filter((x) => x.seller_id === seller) : periodSales), [periodSales, seller]);
+  // Al filtrar por un vendedor se muestra solo lo que él recaudó (sin gastos)
+  const e = useMemo(
+    () => (seller ? [] : expenses.filter((x) => inRange(x.created_at, range))),
+    [expenses, range, seller]
+  );
+  const showExpenses = isAdmin && !seller;
+
+  const sellers = useMemo(() => {
+    const names = new Map(profiles.map((p) => [p.id, p.full_name]));
+    sales.forEach((x) => x.seller_id && !names.has(x.seller_id) && names.set(x.seller_id, x.seller_name || 'Sin nombre'));
+    return [...names.entries()].sort((a, b) => a[1].localeCompare(b[1]));
+  }, [profiles, sales]);
+
+  const bySeller = useMemo(() => {
+    const map = new Map();
+    periodSales.forEach((x) => {
+      const k = x.seller_id || 'none';
+      const cur = map.get(k) || { id: k, name: x.seller_name || 'Sin nombre', count: 0, cash: 0, transfer: 0 };
+      cur.count += 1;
+      if (x.method === 'efectivo') cur.cash += x.total;
+      else cur.transfer += x.total;
+      map.set(k, cur);
+    });
+    return [...map.values()].sort((a, b) => b.cash + b.transfer - (a.cash + a.transfer));
+  }, [periodSales]);
 
   const stats = useMemo(() => {
     const cash = sum(s.filter((x) => x.method === 'efectivo'), (x) => x.total);
@@ -57,41 +83,78 @@ export default function Dashboard({ sales, expenses }) {
 
   return (
     <div className="page">
-      <PageHead title="Resumen" subtitle="Ingresos, gastos y cuánto debería haber en caja" />
+      <PageHead
+        title={isAdmin ? 'Resumen' : 'Mi resumen'}
+        subtitle={isAdmin ? 'Ingresos, gastos y cuánto debería haber en caja' : 'Lo que has vendido y cuánto debes entregar'}
+      />
       <PeriodPicker period={period} setPeriod={setPeriod} custom={custom} setCustom={setCustom} />
+      {isAdmin && sellers.length > 0 && (
+        <div className="chips scroll seller-filter">
+          <span className="chips-label">Vendedor:</span>
+          <button className={`chip ${!seller ? 'active' : ''}`} onClick={() => setSeller('')}>Todos</button>
+          {sellers.map(([id, name]) => (
+            <button key={id} className={`chip ${seller === id ? 'active' : ''}`} onClick={() => setSeller(id)}>{name}</button>
+          ))}
+        </div>
+      )}
 
       {/* Cuadre de caja */}
       <section className="balance">
         <div className="balance-card efectivo">
           <div className="balance-top">
             <span className="balance-icon"><Icon name="cash" size={20} /></span>
-            <span>Debería haber en efectivo</span>
+            <span>{showExpenses ? 'Debería haber en efectivo' : 'Efectivo recibido'}</span>
           </div>
           <strong>{fmt(stats.cash - stats.expCash)}</strong>
           <div className="balance-detail">
             <span>Ventas {fmt(stats.cash)}</span>
-            <span>Gastos −{fmt(stats.expCash)}</span>
+            {showExpenses && <span>Gastos −{fmt(stats.expCash)}</span>}
           </div>
         </div>
         <div className="balance-card transferencia">
           <div className="balance-top">
             <span className="balance-icon"><Icon name="phone" size={20} /></span>
-            <span>Debería haber en transferencias</span>
+            <span>{showExpenses ? 'Debería haber en transferencias' : 'Transferencias recibidas'}</span>
           </div>
           <strong>{fmt(stats.transfer - stats.expTransfer)}</strong>
           <div className="balance-detail">
             <span>Ventas {fmt(stats.transfer)}</span>
-            <span>Gastos −{fmt(stats.expTransfer)}</span>
+            {showExpenses && <span>Gastos −{fmt(stats.expTransfer)}</span>}
           </div>
         </div>
       </section>
 
       <section className="kpis">
-        <Kpi label="Ingresos totales" value={fmt(stats.income)} hint={`${stats.count} ${stats.count === 1 ? 'venta' : 'ventas'}`} />
-        <Kpi label="Gastos" value={fmt(stats.exp)} hint={`${e.length} ${e.length === 1 ? 'registro' : 'registros'}`} />
-        <Kpi label="Ganancia neta" value={fmt(stats.net)} tone={stats.net < 0 ? 'neg' : 'pos'} hint="Ingresos − gastos" />
+        <Kpi label={showExpenses ? 'Ingresos totales' : 'Total vendido'} value={fmt(stats.income)} hint={`${stats.count} ${stats.count === 1 ? 'venta' : 'ventas'}`} />
+        {showExpenses && <Kpi label="Gastos" value={fmt(stats.exp)} hint={`${e.length} ${e.length === 1 ? 'registro' : 'registros'}`} />}
+        {showExpenses && <Kpi label="Ganancia neta" value={fmt(stats.net)} tone={stats.net < 0 ? 'neg' : 'pos'} hint="Ingresos − gastos" />}
         <Kpi label="Ticket promedio" value={fmt(stats.avg)} hint={`${stats.items} productos vendidos`} />
+        {!showExpenses && <Kpi label="Productos vendidos" value={stats.items} hint="Unidades" />}
       </section>
+
+      {isAdmin && !seller && bySeller.length > 0 && (
+        <section className="card">
+          <div className="card-head"><h3>Ventas por vendedor</h3></div>
+          <div className="table-wrap">
+            <table className="table">
+              <thead>
+                <tr><th>Vendedor</th><th className="num">Ventas</th><th className="num">Efectivo</th><th className="num">Transferencia</th><th className="num">Total</th></tr>
+              </thead>
+              <tbody>
+                {bySeller.map((v) => (
+                  <tr key={v.id} className="clickable" onClick={() => v.id !== 'none' && setSeller(v.id)}>
+                    <td><strong>{v.name}</strong></td>
+                    <td className="num">{v.count}</td>
+                    <td className="num">{fmt(v.cash)}</td>
+                    <td className="num">{fmt(v.transfer)}</td>
+                    <td className="num"><strong>{fmt(v.cash + v.transfer)}</strong></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
 
       {stats.income > 0 && (
         <section className="card">
@@ -184,7 +247,7 @@ export default function Dashboard({ sales, expenses }) {
         )}
       </section>
 
-      <div>
+      {showExpenses && (
         <section className="card">
           <div className="card-head"><h3>Gastos por categoría</h3></div>
           {expByCat.length === 0 ? (
@@ -202,7 +265,7 @@ export default function Dashboard({ sales, expenses }) {
             </ul>
           )}
         </section>
-      </div>
+      )}
     </div>
   );
 }

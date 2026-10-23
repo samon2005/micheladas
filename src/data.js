@@ -1,92 +1,125 @@
 import { createClient } from '@supabase/supabase-js';
 import { uid } from './utils';
 
-const url = import.meta.env.VITE_SUPABASE_URL;
-const key = import.meta.env.VITE_SUPABASE_ANON_KEY;
+// La clave pública (anon) está pensada para ir en el navegador: la seguridad la dan las políticas RLS.
+const url = import.meta.env.VITE_SUPABASE_URL || 'https://vlptkwoderbrbqylqjvx.supabase.co';
+const key =
+  import.meta.env.VITE_SUPABASE_ANON_KEY ||
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZscHRrd29kZXJicmJxeWxxanZ4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTAwMjE4MTksImV4cCI6MjEwNTU5NzgxOX0.j13W3ilRH2iAkMC0a2YFCjp3h_bd5jlTdQGj_h1nTFI';
 
-export const isCloud = Boolean(url && key);
-const supabase = isCloud ? createClient(url, key) : null;
+export const supabase = createClient(url, key, {
+  auth: { persistSession: true, autoRefreshToken: true, storageKey: 'mic-auth' },
+});
 
-const TABLES = ['products', 'sales', 'expenses'];
-const lsKey = (t) => `cv_${t}`;
+const TABLES = {
+  products: 'mic_products',
+  sales: 'mic_sales',
+  expenses: 'mic_expenses',
+  profiles: 'mic_profiles',
+};
 
-function readLocal(table) {
-  try {
-    return JSON.parse(localStorage.getItem(lsKey(table)) || '[]');
-  } catch {
-    return [];
-  }
-}
-function writeLocal(table, rows) {
-  localStorage.setItem(lsKey(table), JSON.stringify(rows));
-}
+export const byDateDesc = (a, b) => new Date(b.created_at) - new Date(a.created_at);
 
-const byDateDesc = (a, b) => new Date(b.created_at) - new Date(a.created_at);
-
-function normalize(table, row) {
+export function normalize(table, row) {
   if (table === 'products') return { ...row, price: Number(row.price) };
   if (table === 'sales') return { ...row, total: Number(row.total), items: row.items || [] };
   if (table === 'expenses') return { ...row, amount: Number(row.amount) };
   return row;
 }
 
+// Inserta o reemplaza por id manteniendo el orden por fecha (evita duplicados con el tiempo real)
+export function upsertRow(list, row) {
+  const i = list.findIndex((x) => x.id === row.id);
+  if (i >= 0) {
+    const copy = [...list];
+    copy[i] = row;
+    return copy;
+  }
+  return [row, ...list].sort(byDateDesc);
+}
+
 export const db = {
   async list(table) {
-    if (!TABLES.includes(table)) throw new Error('Tabla inválida');
-    if (isCloud) {
-      const rows = [];
-      const page = 1000;
-      for (let from = 0; ; from += page) {
-        const { data, error } = await supabase
-          .from(table)
-          .select('*')
-          .order('created_at', { ascending: false })
-          .range(from, from + page - 1);
-        if (error) throw error;
-        rows.push(...data);
-        if (data.length < page) break;
-      }
-      return rows.map((r) => normalize(table, r));
+    const rows = [];
+    const page = 1000;
+    for (let from = 0; ; from += page) {
+      const { data, error } = await supabase
+        .from(TABLES[table])
+        .select('*')
+        .order('created_at', { ascending: false })
+        .range(from, from + page - 1);
+      if (error) throw error;
+      rows.push(...data);
+      if (data.length < page) break;
     }
-    return readLocal(table).map((r) => normalize(table, r)).sort(byDateDesc);
+    return rows.map((r) => normalize(table, r));
   },
 
   async insert(table, values) {
-    const row = { id: uid(), created_at: new Date().toISOString(), ...values };
-    if (isCloud) {
-      const { data, error } = await supabase.from(table).insert(row).select().single();
-      if (error) throw error;
-      return normalize(table, data);
-    }
-    writeLocal(table, [row, ...readLocal(table)]);
-    return normalize(table, row);
+    const { data, error } = await supabase
+      .from(TABLES[table])
+      .insert({ id: uid(), ...values })
+      .select()
+      .single();
+    if (error) throw error;
+    return normalize(table, data);
   },
 
   async update(table, id, patch) {
-    if (isCloud) {
-      const { data, error } = await supabase.from(table).update(patch).eq('id', id).select().single();
-      if (error) throw error;
-      return normalize(table, data);
-    }
-    const rows = readLocal(table).map((r) => (r.id === id ? { ...r, ...patch } : r));
-    writeLocal(table, rows);
-    return normalize(table, rows.find((r) => r.id === id));
+    const { data, error } = await supabase.from(TABLES[table]).update(patch).eq('id', id).select().single();
+    if (error) throw error;
+    return normalize(table, data);
   },
 
   async remove(table, id) {
-    if (isCloud) {
-      const { error } = await supabase.from(table).delete().eq('id', id);
-      if (error) throw error;
-      return;
-    }
-    writeLocal(table, readLocal(table).filter((r) => r.id !== id));
+    const { data, error } = await supabase.from(TABLES[table]).delete().eq('id', id).select('id');
+    if (error) throw error;
+    if (!data?.length) throw new Error('No tienes permiso para eliminar este registro');
   },
 
-  // Respaldo del modo local (copia de seguridad / pasar a otro dispositivo)
-  exportAll() {
-    return Object.fromEntries(TABLES.map((t) => [t, readLocal(t)]));
-  },
-  importAll(data) {
-    TABLES.forEach((t) => Array.isArray(data?.[t]) && writeLocal(t, data[t]));
+  // Escucha cambios en tiempo real de todas las tablas. Devuelve la función para cancelar.
+  subscribe(onChange, onStatus) {
+    let channel = supabase.channel('mic-cambios');
+    Object.entries(TABLES).forEach(([name, table]) => {
+      channel = channel.on('postgres_changes', { event: '*', schema: 'public', table }, (payload) =>
+        onChange(name, payload)
+      );
+    });
+    channel.subscribe((status) => onStatus?.(status));
+    return () => supabase.removeChannel(channel);
   },
 };
+
+export const auth = {
+  async signIn(email, password) {
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) throw error;
+  },
+  async signUp(fullName, email, password) {
+    const { data, error } = await supabase.auth.signUp({
+      email,
+      password,
+      options: { data: { full_name: fullName }, emailRedirectTo: window.location.origin },
+    });
+    if (error) throw error;
+    return data;
+  },
+  async signOut() {
+    await supabase.auth.signOut();
+  },
+  async ensureProfile(fullName) {
+    const { data, error } = await supabase.rpc('mic_register', { p_full_name: fullName || '' });
+    if (error) throw error;
+    return data;
+  },
+};
+
+export function authErrorMessage(e) {
+  const m = e?.message || '';
+  if (/invalid login credentials/i.test(m)) return 'Correo o contraseña incorrectos';
+  if (/email not confirmed/i.test(m)) return 'Debes confirmar tu correo antes de entrar (revisa tu bandeja de entrada)';
+  if (/already registered/i.test(m)) return 'Ese correo ya tiene una cuenta. Inicia sesión.';
+  if (/password should be at least/i.test(m)) return 'La contraseña debe tener al menos 6 caracteres';
+  if (/rate limit/i.test(m)) return 'Demasiados intentos. Espera un momento e inténtalo de nuevo.';
+  return m || 'Ocurrió un error';
+}

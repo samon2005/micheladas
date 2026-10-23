@@ -1,16 +1,34 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Empty, Icon, MethodPill, PageHead, PeriodPicker, Segmented } from '../ui';
 import { addDays, dayKey, downloadCSV, fmt, fmtDayLabel, fmtTime, inRange, periodRange } from '../utils';
 
-export default function History({ sales, onDelete }) {
+const EDIT_WINDOW = 15 * 60 * 1000;
+
+export default function History({ sales, onDelete, isAdmin, me }) {
   const [period, setPeriod] = useState('hoy');
   const [custom, setCustom] = useState({ from: dayKey(addDays(new Date(), -6)), to: dayKey(new Date()) });
   const [method, setMethod] = useState('todos');
+  const [seller, setSeller] = useState('');
+  const [, setTick] = useState(0);
+
+  // refresca cada minuto para que el botón de borrar del vendedor desaparezca al pasar 15 min
+  useEffect(() => {
+    if (isAdmin) return;
+    const t = setInterval(() => setTick((x) => x + 1), 60000);
+    return () => clearInterval(t);
+  }, [isAdmin]);
+
+  const sellers = useMemo(
+    () => [...new Map(sales.filter((s) => s.seller_id).map((s) => [s.seller_id, s.seller_name || 'Sin nombre'])).entries()]
+      .sort((a, b) => a[1].localeCompare(b[1])),
+    [sales]
+  );
+  const canDelete = (s) => isAdmin || (s.seller_id === me.id && Date.now() - new Date(s.created_at).getTime() < EDIT_WINDOW);
 
   const range = useMemo(() => periodRange(period, custom), [period, custom]);
   const list = useMemo(
-    () => sales.filter((s) => inRange(s.created_at, range) && (method === 'todos' || s.method === method)),
-    [sales, range, method]
+    () => sales.filter((s) => inRange(s.created_at, range) && (method === 'todos' || s.method === method) && (!seller || s.seller_id === seller)),
+    [sales, range, method, seller]
   );
 
   const groups = useMemo(() => {
@@ -29,10 +47,11 @@ export default function History({ sales, onDelete }) {
 
   const exportCSV = () => {
     downloadCSV(`ventas-${dayKey(new Date())}.csv`, [
-      ['Fecha', 'Hora', 'Productos', 'Método', 'Total', 'Nota'],
+      ['Fecha', 'Hora', 'Vendedor', 'Productos', 'Método', 'Total', 'Nota'],
       ...list.map((s) => [
         dayKey(s.created_at),
         fmtTime(s.created_at),
+        s.seller_name || '',
         s.items.map((i) => `${i.qty}x ${i.name}`).join(', '),
         s.method,
         s.total,
@@ -43,12 +62,21 @@ export default function History({ sales, onDelete }) {
 
   return (
     <div className="page">
-      <PageHead title="Ventas" subtitle="Historial de todas las ventas registradas">
+      <PageHead title={isAdmin ? 'Ventas' : 'Mis ventas'} subtitle={isAdmin ? 'Historial de todas las ventas registradas' : 'Historial de tus ventas'}>
         <button className="btn ghost" onClick={exportCSV} disabled={!list.length}>
           <Icon name="download" size={18} /> Exportar
         </button>
       </PageHead>
       <PeriodPicker period={period} setPeriod={setPeriod} custom={custom} setCustom={setCustom} />
+      {isAdmin && sellers.length > 1 && (
+        <div className="chips scroll seller-filter">
+          <span className="chips-label">Vendedor:</span>
+          <button className={`chip ${!seller ? 'active' : ''}`} onClick={() => setSeller('')}>Todos</button>
+          {sellers.map(([id, name]) => (
+            <button key={id} className={`chip ${seller === id ? 'active' : ''}`} onClick={() => setSeller(id)}>{name}</button>
+          ))}
+        </div>
+      )}
       <div className="filter-row">
         <Segmented
           value={method}
@@ -78,14 +106,17 @@ export default function History({ sales, onDelete }) {
                     <strong>{s.items.map((i) => `${i.qty > 1 ? `${i.qty}× ` : ''}${i.name}`).join(', ')}</strong>
                     <div className="li-meta">
                       <MethodPill method={s.method} />
+                      {isAdmin && s.seller_name && <span className="tag">{s.seller_name}</span>}
                       {s.note && <span className="muted">· {s.note}</span>}
                     </div>
                   </div>
                   <strong className="li-amount">{fmt(s.total)}</strong>
-                  <button className="icon-btn danger" aria-label="Eliminar venta"
-                    onClick={() => confirm(`¿Eliminar esta venta de ${fmt(s.total)}?`) && onDelete(s.id)}>
-                    <Icon name="trash" size={18} />
-                  </button>
+                  {canDelete(s) ? (
+                    <button className="icon-btn danger" aria-label="Eliminar venta"
+                      onClick={() => confirm(`¿Eliminar esta venta de ${fmt(s.total)}?`) && onDelete(s.id)}>
+                      <Icon name="trash" size={18} />
+                    </button>
+                  ) : <span className="icon-btn" />}
                 </li>
               ))}
             </ul>

@@ -4,7 +4,7 @@ import { PRODUCT_COLORS, fmt } from '../utils';
 
 const EMPTY = { name: '', price: 0, category: '', icon: '', color: PRODUCT_COLORS[0] };
 
-export default function Products({ products, actions }) {
+export default function Products({ products, actions, isAdmin, me }) {
   const [editing, setEditing] = useState(null); // null | 'new' | product
   const [query, setQuery] = useState('');
 
@@ -60,10 +60,12 @@ export default function Products({ products, actions }) {
                   <button className="icon-btn" aria-label="Editar" onClick={() => setEditing(p)}>
                     <Icon name="edit" size={18} />
                   </button>
-                  <button className="icon-btn danger" aria-label="Eliminar"
-                    onClick={() => confirm(`¿Eliminar "${p.name}"? Las ventas ya registradas no se borran.`) && actions.deleteProduct(p.id)}>
-                    <Icon name="trash" size={18} />
-                  </button>
+                  {(isAdmin || p.created_by === me.id) && (
+                    <button className="icon-btn danger" aria-label="Eliminar"
+                      onClick={() => confirm(`¿Eliminar "${p.name}"? Las ventas ya registradas no se borran.`) && actions.deleteProduct(p.id)}>
+                      <Icon name="trash" size={18} />
+                    </button>
+                  )}
                 </div>
               </li>
             ))}
